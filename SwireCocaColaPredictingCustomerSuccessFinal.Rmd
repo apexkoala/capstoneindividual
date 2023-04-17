@@ -1,0 +1,538 @@
+---
+title: "Swire Coca Cola - Predicting Customer Success"
+output: html_document
+author: "Nik S"
+---
+
+# Setup
+```{r setup, include=FALSE}
+setwd("~/Desktop/Final Capstone")
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+suppressPackageStartupMessages(suppressWarnings(library(dplyr)))
+suppressPackageStartupMessages(suppressWarnings(library(caret)))
+suppressPackageStartupMessages(suppressWarnings(library(tidyverse)))
+suppressPackageStartupMessages(suppressWarnings(library(psych)))
+suppressPackageStartupMessages(library(scatterplot3d))
+suppressPackageStartupMessages(suppressWarnings(library(rpart)))
+suppressPackageStartupMessages(suppressWarnings(library(rpart.plot)))
+suppressPackageStartupMessages(suppressWarnings(library(C50)))
+suppressPackageStartupMessages(suppressWarnings(library(rminer)))
+suppressPackageStartupMessages(suppressWarnings(library(e1071)))
+suppressPackageStartupMessages(suppressWarnings(library(matrixStats)))
+suppressPackageStartupMessages(suppressWarnings(library(knitr)))
+suppressPackageStartupMessages(suppressWarnings(library(kernlab)))
+suppressPackageStartupMessages(suppressWarnings(library(factoextra)))
+suppressPackageStartupMessages(suppressWarnings(library(cluster)))
+suppressPackageStartupMessages(suppressWarnings(library(tidyr)))
+```
+
+## Business Problem Statement
+  One of the key segments of Swire Coca-Cola’s business relies on partnerships with local businesses to provide refreshments to their communities. The process of acquiring these partnerships can be risky since Swire wants to provide attractive pricing to win business while also ensuring their customers will be profitable over time. Swire Coca-Cola currently has difficulty predicting the success of new customers in various markets. Because of this, Swire is at risk of offering discounts to unprofitable customers and losing their significant initial investment.
+
+  By improving the ability to predict the success and profitability of new B2B customers, Swire can make more informed investment decisions and build long-term relationships with valuable customers. These valuable customers can be better ambassadors for the Swire Coca-Cola business and create lucrative opportunities for many years to come. Predicting partner success can also reduce the costly risk of losing initial investments on unprofitable businesses.
+  
+## Objective  
+  To address this problem, we propose leveraging customer attributes such as store location, customer segment, initial investment amount, and sales data to predict success of new customers. We will also use external data for median income and population by zip code. 
+  
+  We will measure the success of a customer based on anticipated revenue. The models will be evaluated using performance metrics to select the method with the greatest predictive out-of-sample performance with the greatest impact on the desired outcome variables. The benchmark for success on this project is to accurately predict the success or failure of potential customers.
+
+  The project deliverable will include a model which can categorize potential customers into one of four tiers associated with profitability. This can inform Sales how much they are willing to invest in any new prospect. The model will be developed for a specific market subset given the extremely localized dynamics of the refreshment industry. Additionally, a project report and presentation of results will be provided to Swire for review. This project and deliverables will take approximately 3 months to complete with a final presentation to Swire leadership on April 12th.
+  
+  Each section that I worked on individually is marked with a comment. Everything else was created in collaboration with my group.
+  
+## Questions About the Data
+What is the average return on investment?
+What customer segments prove to be the most profitable?
+How important is location for customer success?
+Which products perform the best in different locations?
+Are higher number of transactions associated with increased profit?
+Do low calorie beverages perform better in some areas than others?
+
+## Data Import
+```{r}
+pacman::p_load(tidyverse, RODBC, tidycensus, fastDummies)
+setwd("~/Desktop/Final Capstone")
+# Load Data
+dat <- read.csv("combined_data.csv")
+
+# Select non-historical data
+dat1 <- dat %>% select(c(CUSTOMER_NUMBER_BLINDED, SALES_OFFICE_DESCRIPTION, DELIVERY_PLANT_DESCRIPTION, ON_BOARDING_DATE, ADDRESS_CITY, ADDRESS_ZIP_CODE, COUNTY, GEO_LONGITUDE, GEO_LATITUDE, CUSTOMER_ACTIVITY_CLUSTER_DESCRIPTION, CUSTOMER_TRADE_CHANNEL_DESCRIPTION, CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION, BUSINESS_TYPE_EXTENSION_DESCRIPTION, MARKET_DESCRIPTION, COLD_DRINK_CHANNEL_DESCRIPTION, INVOICE_PRICE))
+
+# Filter data to see only recently onboarded customers
+dat2 <- dat1 %>% filter(ON_BOARDING_DATE > "2017-12-31" & ON_BOARDING_DATE < "2021-1-1") #831844 rows -> 147321 rows
+dim(dat2)
+
+# Make target variable (avg_invoice_price)
+dat3 <- dat2 %>% group_by(CUSTOMER_NUMBER_BLINDED) %>% summarise(
+  CUSTOMER_NUMBER_BLINDED = CUSTOMER_NUMBER_BLINDED, 
+  SALES_OFFICE_DESCRIPTION = SALES_OFFICE_DESCRIPTION, 
+  DELIVERY_PLANT_DESCRIPTION = DELIVERY_PLANT_DESCRIPTION, 
+  ON_BOARDING_DATE = ON_BOARDING_DATE, 
+  ADDRESS_CITY = ADDRESS_CITY, 
+  ADDRESS_ZIP_CODE = ADDRESS_ZIP_CODE, 
+  COUNTY = COUNTY, 
+  GEO_LONGITUDE = GEO_LONGITUDE, 
+  GEO_LATITUDE = GEO_LATITUDE, 
+  CUSTOMER_ACTIVITY_CLUSTER_DESCRIPTION = CUSTOMER_ACTIVITY_CLUSTER_DESCRIPTION, 
+  CUSTOMER_TRADE_CHANNEL_DESCRIPTION = CUSTOMER_TRADE_CHANNEL_DESCRIPTION, 
+  CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION = CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION, 
+  BUSINESS_TYPE_EXTENSION_DESCRIPTION = BUSINESS_TYPE_EXTENSION_DESCRIPTION, 
+  MARKET_DESCRIPTION = MARKET_DESCRIPTION, 
+  COLD_DRINK_CHANNEL_DESCRIPTION = COLD_DRINK_CHANNEL_DESCRIPTION,
+  #sum_invoice_price = round(mean(INVOICE_PRICE),0)
+  sum_invoice_price = round(sum(INVOICE_PRICE), 0)
+) 
+
+# Remove duplicate rows
+dat4 <- dat3[!duplicated(dat3), ] #9974 rows
+dim(dat4)
+
+# Count how many customers have 0 sum invoice price
+dim(dat4 %>% filter(sum_invoice_price == 0)) # 1294 customers have 0 sum_invoice_price
+dim(dat4 %>% filter(sum_invoice_price < 0)) # 21 customers have negative sum_invoice_price
+
+dat5 <- dat4 %>% filter(sum_invoice_price > 0) #8659 remaining customers
+dim(dat5)
+
+# Give tier to customer using their sum_invoice_price
+# I am going to use quartiles to divide the tiers
+dat5$sum_invoice_price %>% summary()
+
+dat6 <- dat5 %>% mutate(tier = as.factor(case_when(sum_invoice_price <= 1500 ~ "tier1",
+                                         sum_invoice_price > 1500 & sum_invoice_price <= 10000 ~ "tier2",
+                                         sum_invoice_price > 10000 & sum_invoice_price <= 25000~ "tier3", 
+                                         sum_invoice_price > 25000 ~ "tier4", 
+                                         )))
+
+# Take out sum_invoice_price from data
+dat7 <- dat6 %>% select(-sum_invoice_price)
+
+dat7 <- separate(dat7, ADDRESS_ZIP_CODE, into = c("ADDRESS_ZIP_CODE", "trash"), sep = "-") %>% select(-"trash")
+
+glimpse(dat7)
+```
+
+```{r, warning=FALSE, message = FALSE, include=FALSE}
+# Join population data using census api
+census_api_key("455b1f8bad5dec096a88f9615cd18bcd6298f6d5", install = TRUE, overwrite = TRUE)
+```
+
+```{r, warning=FALSE, message = FALSE}
+# Join population data using census api
+zipcode_pop <- get_decennial(geography = "zip code tabulation area", variables = "P005003") %>% select(c("GEOID", "value"))
+
+zipcode_pop <- rename(zipcode_pop, ADDRESS_ZIP_CODE = GEOID)
+
+dat8 <- merge(x = dat7, y = zipcode_pop, by = "ADDRESS_ZIP_CODE", all.x = TRUE)
+dat8 <- rename(dat8, population = value)
+glimpse(dat8)
+```
+
+```{r}
+# Join medincome data
+income <- get_acs(geography = "zip code tabulation area", variables = c(medincome = "B19013_001"), year = 2020) %>% select(c("GEOID", "estimate"))
+
+income <- rename(income, ADDRESS_ZIP_CODE = GEOID)
+
+
+dat9 <- merge(x = dat8, y = income, by = "ADDRESS_ZIP_CODE", all.x = TRUE)
+dat9 <- rename(dat9, medincome = estimate)
+
+glimpse(dat9)
+dim(dat9)
+summary(dat9$population)
+summary(dat9$medincome)
+
+dat9 <- dat9 %>% drop_na()
+
+```
+
+```{r, warning=FALSE, message = FALSE}
+# Join population data using census api
+zipcode_pop <- get_decennial(geography = "zip code tabulation area", variables = "P005003") %>% select(c("GEOID", "value"))
+
+zipcode_pop <- rename(zipcode_pop, ADDRESS_ZIP_CODE = GEOID)
+
+dat8 <- merge(x = dat7, y = zipcode_pop, by = "ADDRESS_ZIP_CODE", all.x = TRUE)
+dat8 <- rename(dat8, population = value)
+glimpse(dat8)
+```
+
+```{r}
+# Join medincome data
+income <- get_acs(geography = "zip code tabulation area", variables = c(medincome = "B19013_001"), year = 2020) %>% select(c("GEOID", "estimate"))
+
+income <- rename(income, ADDRESS_ZIP_CODE = GEOID)
+
+
+dat9 <- merge(x = dat8, y = income, by = "ADDRESS_ZIP_CODE", all.x = TRUE)
+dat9 <- rename(dat9, medincome = estimate)
+
+glimpse(dat9)
+dim(dat9)
+summary(dat9$population)
+summary(dat9$medincome)
+
+dat9 <- dat9 %>% drop_na()
+
+```
+
+```{r, warning=FALSE, message = FALSE}
+# Finalize data for ML model
+ml_data <- dat9 %>% select(c("SALES_OFFICE_DESCRIPTION",
+                            "DELIVERY_PLANT_DESCRIPTION",
+                            "CUSTOMER_ACTIVITY_CLUSTER_DESCRIPTION",
+                            "CUSTOMER_TRADE_CHANNEL_DESCRIPTION",
+                            "CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION", 
+                            "BUSINESS_TYPE_EXTENSION_DESCRIPTION",
+                            "MARKET_DESCRIPTION",
+                            "COLD_DRINK_CHANNEL_DESCRIPTION",
+                            "population",
+                            "medincome",
+                            "tier"
+                            ))
+
+
+ml_dat <- dummy_cols(ml_data, select_columns = c("SALES_OFFICE_DESCRIPTION",
+                                      "DELIVERY_PLANT_DESCRIPTION",
+                                      "CUSTOMER_ACTIVITY_CLUSTER_DESCRIPTION",
+                                      "CUSTOMER_TRADE_CHANNEL_DESCRIPTION",
+                                      "CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION", 
+                                      "BUSINESS_TYPE_EXTENSION_DESCRIPTION",
+                                      "MARKET_DESCRIPTION",
+                                      "COLD_DRINK_CHANNEL_DESCRIPTION"
+                                      ))
+dim(ml_dat)
+```
+
+```{r, warning=FALSE, message = FALSE}
+# Load packages
+pacman::p_load(caret, xgboost, mlr, Ckmeans.1d.dp)
+
+# Split Data
+set.seed(300)
+InTrain <- caret::createDataPartition(ml_data$tier, p=.7, list = F)
+
+train <- ml_data %>% dplyr::slice(InTrain)
+test <- ml_data %>% dplyr::slice(-InTrain)
+
+# define predictor and response varialbes in training 
+train_x <- data.matrix(train[, -11])
+train_y <- train[, 11]
+train_y <- as.numeric(train_y) - 1
+
+# define predictor and response varialbes in test 
+test_x <- data.matrix(test[, -11])
+test_y <- test[, 11]
+test_y <- as.numeric(test_y) - 1
+
+# define final training and testing sets
+xgb_train <- xgb.DMatrix(data = train_x, label = train_y)
+xgb_test  <- xgb.DMatrix(data = test_x , label = test_y)
+```
+
+## For training data set
+```{r}
+numberOfClasses <- length(unique(ml_data$tier))
+xgb_params <- list("objective" = "multi:softprob",
+                   "eval_metric" = "mlogloss",
+                   "num_class" = numberOfClasses)
+nround    <- 50 # number of XGBoost rounds
+cv.nfold  <- 5
+
+cv_model <- xgb.cv(params = xgb_params,
+                   data = xgb_train, 
+                   nrounds = nround,
+                   nfold = cv.nfold,
+                   verbose = FALSE,
+                   prediction = TRUE)
+```
+
+```{r}
+OOF_prediction <- data.frame(cv_model$pred) %>%
+  mutate(max_prob = max.col(., ties.method = "last"),
+         label = train_y + 1)
+head(OOF_prediction)
+```
+
+```{r}
+# confusion matrix
+confusionMatrix(factor(OOF_prediction$max_prob),
+                factor(OOF_prediction$label),
+                mode = "everything")
+```
+
+## For testing data set
+```{r}
+bst_model <- xgb.train(params = xgb_params,
+                       data = xgb_train,
+                       nrounds = nround)
+
+# Predict hold-out test set
+test_pred <- predict(bst_model, newdata = xgb_test)
+test_prediction <- matrix(test_pred, nrow = numberOfClasses,
+                          ncol=length(test_pred)/numberOfClasses) %>%
+  t() %>%
+  data.frame() %>%
+  mutate(label = test_y + 1,
+         max_prob = max.col(., "last"))
+# confusion matrix of test set
+confusionMatrix(factor(test_prediction$max_prob),
+                factor(test_prediction$label),
+                mode = "everything")
+```
+
+## Varible importance
+```{r}
+# get the feature real names
+names <-  colnames(ml_data[,-11])
+# compute feature importance matrix
+importance_matrix = xgb.importance(feature_names = names, model = bst_model)
+head(importance_matrix)
+```
+
+```{r}
+# plot
+gp = xgb.ggplot.importance(importance_matrix)
+print(gp) 
+```
+
+```{r}
+# Individual
+# Feature importance plot
+gp1 = xgb.ggplot.importance(importance_matrix) + theme_minimal()
+print(gp1) 
+#ggsave("feature_importanceall.jpg", width = 7, height = 5, dpi = 500)
+```
+
+```{r}
+# Individual
+# Top 3 Feature importance plot
+gp = xgb.ggplot.importance(importance_matrix, top_n = 3) + theme_minimal()
+print(gp) 
+#ggsave("feature_importance.jpg", width = 7, height = 5, dpi = 500)
+```
+
+```{r}
+# Categorizing data in A through D tiers
+TD <- dat9 %>% filter(tier == "tier1")
+TC <- dat9 %>% filter(tier == "tier2")
+TB <- dat9 %>% filter(tier == "tier3")
+TA <- dat9 %>% filter(tier == "tier4")
+```
+
+```{r}
+# Individual
+# Chart showing Trade Channel Description by each tier
+ggplot() +
+  geom_bar(data = TD, aes(x=CUSTOMER_TRADE_CHANNEL_DESCRIPTION, fill = "red")) +
+  geom_bar(data = TC, aes(x=CUSTOMER_TRADE_CHANNEL_DESCRIPTION, fill = "orange")) +
+  geom_bar(data = TB, aes(x=CUSTOMER_TRADE_CHANNEL_DESCRIPTION, fill = "blue")) +
+  geom_bar(data = TA, aes(x=CUSTOMER_TRADE_CHANNEL_DESCRIPTION, fill = "green")) +
+  coord_flip()+
+  theme_minimal()
+```
+
+```{r}
+# Individual
+# Chart showing Trade Channel Description by each tier
+ggplot(data=dat9, aes(x=CUSTOMER_TRADE_CHANNEL_DESCRIPTION, y=tier)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_minimal()
+```
+
+
+```{r}
+# CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION
+# SALES_OFFICE_DESCRIPTION
+  
+table(TD["CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION"])
+table(TC["CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION"])
+table(TB["CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION"])
+table(TA["CUSTOMER_TRADE_CHANNEL_DESCRIPTION"])
+```
+
+```{r}
+table(train["tier"])
+```
+
+The remainder of the data analysis was completed individually.
+
+```{r import, echo=TRUE}
+# Combined Data Import
+s <- read.csv("combined_data.csv")
+```
+
+# Basic EDA & Data Prep
+```{r, echo=TRUE}
+# Remove duplicate rows
+s <- s[!duplicated(s), ]
+# Factoring Appropriate Sales variables
+s$CUSTOMER_NUMBER_BLINDED <- as.factor(s$CUSTOMER_NUMBER_BLINDED)
+s$SALES_OFFICE_DESCRIPTION <- as.factor(s$SALES_OFFICE_DESCRIPTION)
+s$DELIVERY_PLANT_DESCRIPTION <- as.factor(s$DELIVERY_PLANT_DESCRIPTION)
+s$ON_BOARDING_DATE <- as.Date(s$ON_BOARDING_DATE, "%Y-%m-%d")
+s$ADDRESS_CITY <- as.factor(s$ADDRESS_CITY)
+s$ADDRESS_ZIP_CODE <- as.factor(s$ADDRESS_ZIP_CODE)
+s$COUNTY <- as.factor(s$COUNTY)
+s$CUSTOMER_ACTIVITY_CLUSTER_DESCRIPTION <- as.factor(s$CUSTOMER_ACTIVITY_CLUSTER_DESCRIPTION)
+s$CUSTOMER_TRADE_CHANNEL_DESCRIPTION <- as.factor(s$CUSTOMER_TRADE_CHANNEL_DESCRIPTION)
+s$CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION <- as.factor(s$CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION)
+s$BUSINESS_TYPE_EXTENSION_DESCRIPTION <- as.factor(s$BUSINESS_TYPE_EXTENSION_DESCRIPTION)
+s$CUSTOMER_TRADE_CHANNEL_DESCRIPTION2 <- as.factor(s$CUSTOMER_TRADE_CHANNEL_DESCRIPTION2)
+s$MARKET_DESCRIPTION <- as.factor(s$MARKET_DESCRIPTION)
+s$COLD_DRINK_CHANNEL_DESCRIPTION <- as.factor(s$COLD_DRINK_CHANNEL_DESCRIPTION)
+s$PRODUCT_SOLD_BLINDED <- as.factor(s$PRODUCT_SOLD_BLINDED)
+s$BEV_CAT_DESC <- as.factor(s$BEV_CAT_DESC)
+s$CALORIE_CAT_DESC <- as.factor(s$CALORIE_CAT_DESC)
+s$PACK_TYPE_DESC <- as.factor(s$PACK_TYPE_DESC)
+s$PACK_SIZE_SALES_UNIT_DESCRIPTION <- as.factor(s$PACK_SIZE_SALES_UNIT_DESCRIPTION)
+s$MIN_POSTING_DATE <- as.Date(s$MIN_POSTING_DATE)
+s$MAX_POSTING_DATE <- as.Date(s$MAX_POSTING_DATE)
+```
+
+
+```{r basic data structure, echo=TRUE}
+str(s)
+summary(s)
+```
+
+```{r, echo=FALSE, include=FALSE}
+# More data cleaning
+# table(s$INVOICE_PRICE, useNA = "always")
+s1 <- s
+s1 %>% 
+  filter(INVOICE_PRICE > 0) %>%
+  filter(COGS > 0)
+```
+
+Average return on investment:
+```{r, echo=TRUE}
+mean(s1$COGS)
+mean(s1$INVOICE_PRICE)
+(mean(s1$COGS)/mean(s1$INVOICE_PRICE))
+```
+
+The following summary table shows the distribution of the INVOICE_PRICE variable which is arguably the most important output variable. This will be used to assess the success of customers, since the overall goal is to maximize the revenue for Swire by predicting customer success. This variable is the best metric because it shows the gross profit after all customer marketing expenses and rebates subtracted.
+
+```{r, echo=TRUE}
+s1 %>% summarize(mean = mean(s1$INVOICE_PRICE), median = median(s1$INVOICE_PRICE), sd = sd(s1$INVOICE_PRICE), 
+             percentile_10 = quantile(s1$INVOICE_PRICE, prob = .1), percentile_90 = quantile(s1$INVOICE_PRICE, .9))
+```
+
+These results show that there is an extreme amount of variability in the data with a standard deviation of 2631. The difference between the mean and median shows that the data are likely very skewed. The following histogram shows the distribution graphically.
+
+```{r, echo=TRUE}
+ggplot(s1, aes(x=INVOICE_PRICE)) +
+  geom_histogram(bins=30) +
+  labs(title = "Histogram of Invoice Price")
+```
+
+The extreme number of 0 values is making it almost impossible to view. Given the large variability as well, showing histogram with log transformation.
+
+```{r, echo=TRUE}
+  ggplot(s1, aes(x=log(INVOICE_PRICE))) +
+  geom_histogram(bins = 40) +
+  labs(title = "Histogram of Invoice Price - Log Transformed")
+```
+
+This shows us that the data are mostly normally distributed with the majority of profit remaining positive. However, there seems to be quite a bit of negative profit. The following boxplot shows the same transformed results.
+
+```{r, echo=TRUE}
+ggplot(s1, aes(x=log(INVOICE_PRICE))) +
+  geom_boxplot() +
+  labs(title = "Log Invoice Price Boxplot")
+```
+
+I wanted to assess the correlation between number of transactions and invoice price.
+
+```{r, echo=TRUE}
+ggplot(s1, aes(x=log(INVOICE_PRICE), y = NUM_OF_TRANSACTIONS)) +
+  geom_point() +
+  stat_smooth(method="lm", se = F) +
+  labs(title = "Log Invoice Price ~ Number of Transactions")
+```
+
+There is a somewhat positive relationship between log invoice price and number of transactions, but the large number of negative profit and 0 profit transactions is again skewing the data.
+
+Pair panels of select variables
+
+```{r, echo=TRUE}
+pairs.panels(s1[c(22,24,30)])
+```
+
+I was surprised to see fairly significant correlation between the physical volume, invoice price, and number of transactions. 
+
+```{r, echo=TRUE}
+pairs.panels(s1[c(22,24,27)])
+```
+
+Correlation matrix for all numerical values.
+
+```{r, echo=TRUE}
+cor(s1[c(22:27,30)])
+```
+
+There is definitely some multicollinearity since a few of these variables are functions of each other. Regardless, it is still interesting to see how much variation can be explained by different variables.
+
+Table of beverage categories
+
+```{r, echo=TRUE}
+table(s1$BEV_CAT_DESC)
+```
+
+
+# Modeling
+  In order to appropriately assess what variables lead to customer success, we have decided to leverage several different modeling techniques. We want to start by clustering customers based on their attributes then leverage additional models to predict success by cluster. I will be focusing most of my efforts on various classification/clustering techniques to try and find these similar attributes and try to understand how they may lead to customer success or failure.
+Models of interest:
+Logistic and linear regression
+KMeans clustering (and various adaptations)
+K-Nearest Neighbors
+Support Vector Machines
+Artificial Neural Networks 
+  
+```{r}  
+# Set up test and train datasets
+s2 <- s1 %>%
+  mutate(INVOICE_PRICE = replace_na(INVOICE_PRICE, 0))
+set.seed(1234)
+InTrain <- createDataPartition(s2$INVOICE_PRICE, p=.7, list = F)
+train <- s2[InTrain,]
+test <- s2[-InTrain,]
+```
+
+```{r}
+ggplot() +
+  geom_point(x = v$CUSTOMER_SUB_TRADE_CHANNEL_DESCRIPTION, y = v$m) + 
+  theme_minimal()
+
+```
+
+```{r}
+# Tree Models - Not very valuable
+# Tree model with all variables
+(tree_mod1 <- rpart(INVOICE_PRICE ~ ., data = train))
+rpart.plot(x=tree_mod1)
+# Tree model with limited variables
+(tree_mod2 <- rpart(INVOICE_PRICE ~ CUSTOMER_ACTIVITY_CLUSTER_DESCRIPTION + BUSINESS_TYPE_EXTENSION_DESCRIPTION + COLD_DRINK_CHANNEL_DESCRIPTION + CALORIE_CAT_DESC, data = train))
+rpart.plot(x=tree_mod2)
+# Tree model with alternate variables
+(tree_mod3 <- rpart(INVOICE_PRICE ~ CALORIE_CAT_DESC + MARKET_DESCRIPTION + COGS + COLD_DRINK_CHANNEL_DESCRIPTION, data = train))
+rpart.plot(x=tree_mod3)
+```
+
+As you can see, none of these trees do a very good job of conveying interpretable information. However, two interesting variable do stand out: the calorie category description and COGS. Low calorie beverages definitely have some association with the invoice price. Also, quite logically, COGS is also associated with the invoice price since they are inherently tied to the same inputs but are at varying levels of processing. 
+
+# Results
+Preface for resutls
+  The data set is extremely large which has made most EDA and modeling assessments very difficult due to how computationally intensive each operation is. Because of this, we have only been able to assess some variables in isolation which has prevented us from investigating some interactions between variables. We will continue to evaluate potential interactions and modeling techniques in the future as we have more time available to run models for 2-hour at a time. Unfortunately, I was not able to explore the number of models that I initially planned because the SVM with 2 variables took nearly 3 hours to complete. Because of this runtime, I could not include it in the knit document.
+  
+Interpretations
+  Overall, a few key results seemed most relevant to this investigation. The customer activity cluster description in the decision trees provided some interesting results. It helped solidify that some variables, such as beverage calorie category, have an influence on invoice price. There seems to be a lot of variation in the data led mostly by missing values and various order issues which can lead to negative or zero profit. Given the broad range of values that invoice price can take, we will likely need to log-transform it for use in our models. We have concatenated the customer descriptions with the sales data to better understand how customer features influence sales data. Additionally, more assessment of the invoice price variable is needed to appropriately infer how variables influence this important outcome. The variables that seem the most important for assessing customer success include zip code, activity channel, and cold drink channel description. Further data cleaning and mutation is needed before model assessment can be conducted.
+  
+  Currently, none of the models from this modeling assessment sufficiently meet the Business Objectives of this project. Further assessment is still necessary. Future investigation will focus on how to classify a invoice price as successful as not. Likely, any invoice price greater than COGS will be classified as a success. This will then be applied to test data set to see whether 2 or 3 variables can be used to accurately predict customer success with sufficient accuracy. Our team will combine our findings to create hybrid models capable of predicting customer success in various settings. 
+
+
+# Ethical Considerations
+  As with any data analysis project, it is important to assess any and all ethical concerns that could arise from this investigation. One of the most obvious concerns is that providing the model outputs to Swire could lead to unfair treatment of current and future customers. The best mitigation is to ensure that these models are only used to inform potential decisions and are not used as sole justification for any interaction with customers. Models are never perfect and any interpretations should keep this in mind. Another potential concern is that these models could be used to give Swire an unfair competitive advantage in their market. However, nothing is preventing Swire's competitors from doing a similar project to find similar results. Data are often released for data scientists to analyze in various competitions which could yield similar results. Besides these two examples, there are not many ways in which these models could be used for nefarious purposes. However, it is important to evaluate the ethics of a project iteratively to ensure no new concerns arise during the course of the investigation. 
